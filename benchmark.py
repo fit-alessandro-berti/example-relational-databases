@@ -1100,6 +1100,44 @@ def _validate(s: Scenario, folder: Path, conn: sqlite3.Connection, events: list[
     return report
 
 
+def _source_table_fields(folder: Path) -> list[tuple[str, list[tuple[str, str]]]]:
+    """Read table names and declared column types from source.sqlite."""
+    conn = sqlite3.connect(f"file:{folder / 'source.sqlite'}?mode=ro", uri=True)
+    try:
+        tables = [
+            row[0]
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name"
+            )
+        ]
+        schema: list[tuple[str, list[tuple[str, str]]]] = []
+        for table in tables:
+            columns = [
+                (row[1], row[2] or "")
+                for row in conn.execute(f'PRAGMA table_info("{table}")')
+            ]
+            schema.append((table, columns))
+        return schema
+    finally:
+        conn.close()
+
+
+def _source_table_fields_markdown(folder: Path) -> str:
+    lines = [
+        "## Tables and fields",
+        "",
+        "The following tables and columns are present in `source.sqlite`:",
+        "",
+    ]
+    for table, columns in _source_table_fields(folder):
+        fields = ", ".join(
+            f"`{name}` {declared}" if declared else f"`{name}`"
+            for name, declared in columns
+        )
+        lines.append(f"- `{table}` — {fields}")
+    return "\n".join(lines)
+
+
 def _write_docs(s: Scenario, folder: Path, instance_count: int, views: list[dict[str, Any]]) -> None:
     rulebooks = {
         "forgeflow": [
@@ -1215,6 +1253,7 @@ def _write_docs(s: Scenario, folder: Path, instance_count: int, views: list[dict
     tables = "\n".join(f"- `{name}`" for name in s.evidence_tables)
     table_guide = "\n".join(f"- `{name}` — {meaning}." for name, meaning in table_guides[s.slug].items())
     ambiguity_rules = "\n".join(f"- {rule}" for rule in rulebooks[s.slug])
+    source_schema = _source_table_fields_markdown(folder)
     documentation = f"""# {s.title}: source documentation
 
 ## Purpose
@@ -1234,6 +1273,8 @@ Primary evidence families:
 {table_guide}
 
 The database deliberately contains mixed business and technical records, late recording times, redundant evidence, shared master/asset references, and historical relationships. Text codes are technical source codes. Current-state fields, update timestamps, retries, and administrative corrections are not automatically business events.
+
+{source_schema}
 
 ## Deterministic ambiguity rules
 

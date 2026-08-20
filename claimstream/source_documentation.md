@@ -26,6 +26,29 @@ Primary evidence families:
 
 The database deliberately contains mixed business and technical records, late recording times, redundant evidence, shared master/asset references, and historical relationships. Text codes are technical source codes. Current-state fields, update timestamps, retries, and administrative corrections are not automatically business events.
 
+## Tables and fields
+
+The following tables and columns are present in `source.sqlite`:
+
+- `claim_projection` — `claim_ref` TEXT, `current_state_code` TEXT, `last_global_position` INTEGER, `projection_json` TEXT
+- `command_log` — `command_id` TEXT, `stream_id` TEXT, `command_type` TEXT, `accepted_at` TEXT, `payload_json` TEXT
+- `command_result` — `result_id` TEXT, `stream_id` TEXT, `event_type` TEXT, `semantic_code` TEXT, `result_code` TEXT, `occurred_at` TEXT, `recorded_at` TEXT, `payload_json` TEXT, `correlation_id` TEXT, `actor_code` TEXT
+- `document_index` — `document_id` TEXT, `stream_id` TEXT, `event_type` TEXT, `semantic_code` TEXT, `effective_at` TEXT, `indexed_at` TEXT, `payload_json` TEXT, `correlation_id` TEXT, `index_status` TEXT
+- `event_store` — `global_position` INTEGER, `stream_id` TEXT, `stream_type` TEXT, `stream_version` INTEGER, `event_type` TEXT, `schema_version` INTEGER, `occurred_at` TEXT, `recorded_at` TEXT, `payload_json` TEXT, `metadata_json` TEXT, `correlation_id` TEXT, `causation_id` TEXT, `tenant_id` TEXT, `is_redacted` INTEGER
+- `event_type_alias` — `event_type` TEXT, `schema_version` INTEGER, `semantic_code` TEXT
+- `exposure_projection` — `exposure_ref` TEXT, `claim_ref` TEXT, `current_state_code` TEXT, `last_global_position` INTEGER
+- `inbox_message` — `message_id` TEXT, `sender_ref` TEXT, `event_type` TEXT, `semantic_code` TEXT, `occurred_at` TEXT, `recorded_at` TEXT, `payload_json` TEXT, `correlation_id` TEXT, `processed_flag` INTEGER
+- `outbox_message` — `message_id` TEXT, `correlation_id` TEXT, `topic_code` TEXT, `payload_json` TEXT, `queued_at` TEXT, `sent_at` TEXT
+- `party_projection` — `party_ref` TEXT, `masked_identity` TEXT, `current_role_code` TEXT
+- `payment_projection` — `payment_ref` TEXT, `claim_ref` TEXT, `current_state_code` TEXT, `amount_value` REAL
+- `projection_checkpoint` — `projection_name` TEXT, `global_position` INTEGER, `updated_at` TEXT
+- `redacted_identity_map` — `redacted_ref` TEXT, `stable_party_ref` TEXT, `redacted_at` TEXT
+- `repair_projection` — `repair_ref` TEXT, `claim_ref` TEXT, `current_state_code` TEXT
+- `saga_state` — `saga_id` TEXT, `correlation_id` TEXT, `state_code` TEXT, `payload_json` TEXT, `checkpoint_at` TEXT
+- `schema_upcaster_rule` — `event_type` TEXT, `from_version` INTEGER, `to_version` INTEGER, `rule_json` TEXT
+- `snapshot_store` — `stream_id` TEXT, `stream_version` INTEGER, `snapshot_type` TEXT, `snapshot_json` TEXT, `written_at` TEXT
+- `stream_alias` — `alias_id` TEXT, `canonical_stream_id` TEXT, `valid_from` TEXT, `valid_to` TEXT
+
 ## Deterministic ambiguity rules
 
 - Exclude technical stream types and technical event aliases before business classification.
