@@ -10,6 +10,38 @@ extraction problems:
 - `permitflow` — workflow-engine history
 - `batteryvault` — bitemporal Data Vault and asset ledger
 
+## Relational database structures
+
+- **ForgeFlow** uses a normalized operational schema for customers, RFQs,
+  quotes, sales orders, engineering, production, procurement, quality,
+  fulfilment, and finance. Business milestones are distributed across six
+  evidence tables with different timestamp encodings and connected through a
+  predecessor/successor document-conversion bridge.
+- **TrialVersion** stores each clinical entity in a dedicated `*_v` table whose
+  rows carry logical IDs, version numbers, valid time, recording time, and a
+  change kind. Historized relation, edit-session, code-dictionary, and site
+  time-zone tables provide the cross-entity and interpretation context.
+- **ProcureChange** combines SAP-style `CDHDR`/`CDPOS` change documents and
+  overlapping archive copies with ordinary requisition, receipt, inspection,
+  invoice, accounting, and payment tables. Packed application keys, field
+  metadata, document flow, and approval history must be resolved during
+  extraction.
+- **ClaimStream** is centered on an append-only event store containing
+  schema-versioned JSON payloads, supplemented by command results, inbox
+  messages, and indexed documents. Aliases and upcaster rules normalize event
+  versions, while snapshots, projections, sagas, and outbox records are
+  non-authoritative technical state.
+- **PermitFlow** models a generic workflow engine with process definitions,
+  execution ancestry, activity/task histories, versioned variables, messages,
+  forms, external tasks, migrations, jobs, and incidents. Separate domain
+  tables hold the current permit, parcel, review, fee, inspection, objection,
+  and appeal state.
+- **BatteryVault** follows a Data Vault design with identity hubs, historized
+  links and link effectivity, and bitemporal satellites containing status and
+  attribute histories. Balanced asset-journal/ledger entries model custody and
+  ownership changes, with crosswalk, retired-identifier, and source-precedence
+  tables handling identity and conflicting source facts.
+
 Each folder contains `source.sqlite`, the source schema and generator,
 documentation and glossary, a machine-readable challenge manifest, an OCEL 2.0
 SQLite oracle written by PM4Py, a validation report, and four reproducible
