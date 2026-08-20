@@ -124,24 +124,59 @@
     "Lifecycle Closed"
   ],
   "activity_count": 60,
+  "case_view_ordering": [
+    "case_id",
+    "timestamp",
+    "source_record_id"
+  ],
   "case_views": [
     {
+      "case_type": "BatteryPack",
       "csv": "case_views/primary_cases.csv",
       "name": "primary_cases",
-      "rows": 38717,
+      "rows": 88346,
+      "sort_order": [
+        "case_id",
+        "timestamp",
+        "source_record_id"
+      ],
       "sql": "case_views/primary_cases.sql"
     },
     {
+      "case_type": "BatteryPack",
       "csv": "case_views/exception_cases.csv",
       "name": "exception_cases",
-      "rows": 4507,
+      "rows": 38342,
+      "sort_order": [
+        "case_id",
+        "timestamp",
+        "source_record_id"
+      ],
       "sql": "case_views/exception_cases.sql"
     },
     {
+      "case_type": "BatteryPack",
       "csv": "case_views/multi_object_cases.csv",
       "name": "multi_object_cases",
-      "rows": 15437,
+      "rows": 88346,
+      "sort_order": [
+        "case_id",
+        "timestamp",
+        "source_record_id"
+      ],
       "sql": "case_views/multi_object_cases.sql"
+    },
+    {
+      "case_type": "ServiceOrder",
+      "csv": "case_views/secondary_object_cases.csv",
+      "name": "secondary_object_cases",
+      "rows": 3956,
+      "sort_order": [
+        "case_id",
+        "timestamp",
+        "source_record_id"
+      ],
+      "sql": "case_views/secondary_object_cases.sql"
     }
   ],
   "deterministic_rules": [
@@ -149,7 +184,9 @@
     "Administrative correction, replay, retry, migration, and recalculation records are excluded.",
     "Business effective time takes precedence over recording/load time.",
     "Shared transaction or correlation identifiers are fused before case-view output.",
-    "The configured seed and modular occurrence schedule contain no nondeterministic input.",
+    "Only declared master-data types share identities across primary cases; transactional identities remain case-local.",
+    "Every CSV is sorted by case_id, timestamp, then source_record_id as a deterministic tie-breaker.",
+    "The configured seed and explicit process routes contain no nondeterministic input.",
     "Order satellite facts by effective_from, then source precedence and load_dts; ignore hashdiff replays.",
     "Corrections with the same effective interval change attributes without adding an activity.",
     "Balance debit and credit entries by journal and asset before emitting one custody or ownership movement."
@@ -201,7 +238,9 @@
     "Incident"
   ],
   "oracle_writer": "pm4py.write_ocel2_sqlite",
+  "primary_case_type": "BatteryPack",
   "scenario": "batteryvault",
+  "secondary_case_type": "ServiceOrder",
   "seed": 20260820,
   "source_pattern": "bitemporal Data Vault satellites plus balanced custody and ownership ledger",
   "title": "BatteryVault \u2014 circular battery lifecycle"

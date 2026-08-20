@@ -116,24 +116,59 @@
     "Data Query Closed"
   ],
   "activity_count": 56,
+  "case_view_ordering": [
+    "case_id",
+    "timestamp",
+    "source_record_id"
+  ],
   "case_views": [
     {
+      "case_type": "Participant",
       "csv": "case_views/primary_cases.csv",
       "name": "primary_cases",
-      "rows": 37104,
+      "rows": 74661,
+      "sort_order": [
+        "case_id",
+        "timestamp",
+        "source_record_id"
+      ],
       "sql": "case_views/primary_cases.sql"
     },
     {
+      "case_type": "Participant",
       "csv": "case_views/exception_cases.csv",
       "name": "exception_cases",
-      "rows": 3512,
+      "rows": 33769,
+      "sort_order": [
+        "case_id",
+        "timestamp",
+        "source_record_id"
+      ],
       "sql": "case_views/exception_cases.sql"
     },
     {
+      "case_type": "Participant",
       "csv": "case_views/multi_object_cases.csv",
       "name": "multi_object_cases",
-      "rows": 14827,
+      "rows": 74661,
+      "sort_order": [
+        "case_id",
+        "timestamp",
+        "source_record_id"
+      ],
       "sql": "case_views/multi_object_cases.sql"
+    },
+    {
+      "case_type": "Sample",
+      "csv": "case_views/secondary_object_cases.csv",
+      "name": "secondary_object_cases",
+      "rows": 36832,
+      "sort_order": [
+        "case_id",
+        "timestamp",
+        "source_record_id"
+      ],
+      "sql": "case_views/secondary_object_cases.sql"
     }
   ],
   "deterministic_rules": [
@@ -141,7 +176,9 @@
     "Administrative correction, replay, retry, migration, and recalculation records are excluded.",
     "Business effective time takes precedence over recording/load time.",
     "Shared transaction or correlation identifiers are fused before case-view output.",
-    "The configured seed and modular occurrence schedule contain no nondeterministic input.",
+    "Only declared master-data types share identities across primary cases; transactional identities remain case-local.",
+    "Every CSV is sorted by case_id, timestamp, then source_record_id as a deterministic tie-breaker.",
+    "The configured seed and explicit process routes contain no nondeterministic input.",
     "Order versions by version_no for recording precedence and use valid_from for business time.",
     "Only BUSINESS versions with a classified semantic state can produce events; corrections update attributes.",
     "Resolve versioned relations at the event's valid time, never from a stale is_current flag."
@@ -195,7 +232,9 @@
     "Investigator"
   ],
   "oracle_writer": "pm4py.write_ocel2_sqlite",
+  "primary_case_type": "Participant",
   "scenario": "trialversion",
+  "secondary_case_type": "Sample",
   "seed": 20260820,
   "source_pattern": "in-table row versioning with semantic diffs and correction filtering",
   "title": "TrialVersion \u2014 clinical-trial execution"

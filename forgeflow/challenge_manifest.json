@@ -100,24 +100,59 @@
     "Order Closed"
   ],
   "activity_count": 48,
+  "case_view_ordering": [
+    "case_id",
+    "timestamp",
+    "source_record_id"
+  ],
   "case_views": [
     {
+      "case_type": "SalesOrder",
       "csv": "case_views/primary_cases.csv",
       "name": "primary_cases",
-      "rows": 36109,
+      "rows": 97884,
+      "sort_order": [
+        "case_id",
+        "timestamp",
+        "source_record_id"
+      ],
       "sql": "case_views/primary_cases.sql"
     },
     {
+      "case_type": "SalesOrder",
       "csv": "case_views/exception_cases.csv",
       "name": "exception_cases",
-      "rows": 2889,
+      "rows": 35784,
+      "sort_order": [
+        "case_id",
+        "timestamp",
+        "source_record_id"
+      ],
       "sql": "case_views/exception_cases.sql"
     },
     {
+      "case_type": "SalesOrder",
       "csv": "case_views/multi_object_cases.csv",
       "name": "multi_object_cases",
-      "rows": 14553,
+      "rows": 97884,
+      "sort_order": [
+        "case_id",
+        "timestamp",
+        "source_record_id"
+      ],
       "sql": "case_views/multi_object_cases.sql"
+    },
+    {
+      "case_type": "Shipment",
+      "csv": "case_views/secondary_object_cases.csv",
+      "name": "secondary_object_cases",
+      "rows": 15000,
+      "sort_order": [
+        "case_id",
+        "timestamp",
+        "source_record_id"
+      ],
+      "sql": "case_views/secondary_object_cases.sql"
     }
   ],
   "deterministic_rules": [
@@ -125,7 +160,9 @@
     "Administrative correction, replay, retry, migration, and recalculation records are excluded.",
     "Business effective time takes precedence over recording/load time.",
     "Shared transaction or correlation identifiers are fused before case-view output.",
-    "The configured seed and modular occurrence schedule contain no nondeterministic input.",
+    "Only declared master-data types share identities across primary cases; transactional identities remain case-local.",
+    "Every CSV is sorted by case_id, timestamp, then source_record_id as a deterministic tie-breaker.",
+    "The configured seed and explicit process routes contain no nondeterministic input.",
     "Normalize each table's native time representation before ordering.",
     "Fuse outbox/package/movement evidence only when transaction reference and business scope agree.",
     "Treat current status and updated-at fields as state, not standalone events."
@@ -197,7 +234,9 @@
     "Warranty"
   ],
   "oracle_writer": "pm4py.write_ocel2_sqlite",
+  "primary_case_type": "SalesOrder",
   "scenario": "forgeflow",
+  "secondary_case_type": "Shipment",
   "seed": 20260820,
   "source_pattern": "normalized OLTP milestones with heterogeneous timestamps and duplicate evidence",
   "title": "ForgeFlow \u2014 engineer-to-order manufacturing"

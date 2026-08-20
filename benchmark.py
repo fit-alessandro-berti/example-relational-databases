@@ -24,6 +24,17 @@ import pandas as pd
 import pm4py
 from pm4py.objects.ocel.obj import OCEL
 
+from domain_rules import (
+    CASE_TYPES,
+    O2O_EDGES,
+    SECONDARY_CASE_TYPES,
+    SHARED_POOL_SIZES,
+    actor_role,
+    build_route,
+    context_types,
+    subject_type,
+)
+
 
 DEFAULT_SEED = 20260820
 DEFAULT_INSTANCES = 3000
@@ -141,10 +152,9 @@ def _safe_type(value: str) -> str:
     return "".join(out)
 
 
-def _object_id(s: Scenario, object_type: str, case_no: int, type_index: int) -> str:
-    # Early lifecycle objects are instance-specific; later master/asset objects
-    # are pooled and therefore genuinely shared by multiple processes.
-    number = case_no if type_index < 4 else ((case_no - 1) % 500) + 1
+def _object_id(s: Scenario, object_type: str, case_no: int, type_index: int | None = None) -> str:
+    pool_size = SHARED_POOL_SIZES[s.slug].get(object_type)
+    number = ((case_no - 1) % pool_size) + 1 if pool_size else case_no
     return f"{s.prefix}-{_safe_type(object_type)}-{number:06d}"
 
 
@@ -155,38 +165,82 @@ def _build_canonical(s: Scenario, instance_count: int) -> tuple[list[dict[str, A
     o2o: list[dict[str, Any]] = []
     changes: list[dict[str, Any]] = []
     event_seq = 0
-    object_index = {name: i for i, name in enumerate(s.object_types)}
     base = datetime(2023, 1, 1, 6, 0, tzinfo=timezone.utc)
+    case_type = CASE_TYPES[s.slug]
+    subject_by_event: dict[str, str] = {}
+    case_objects: dict[int, set[str]] = defaultdict(set)
 
     def ensure_object(object_type: str, case_no: int) -> str:
-        idx = object_index[object_type]
-        oid = _object_id(s, object_type, case_no, idx)
+        oid = _object_id(s, object_type, case_no)
         if oid not in objects:
+            shared = object_type in SHARED_POOL_SIZES[s.slug]
             objects[oid] = {
                 "ocel:oid": oid,
                 "ocel:type": object_type,
                 "business_key": oid.split("-", 1)[1],
                 "source_system": f"{s.prefix}_SRC",
                 "region": ("DE-N", "DE-S", "EU-W", "EU-C")[case_no % 4],
-                "initial_status": "I0",
+                "object_category": "SHARED_MASTER" if shared else "TRANSACTIONAL",
+                "lifecycle_status": "IDENTIFIED",
             }
+        case_objects[case_no].add(oid)
         return oid
 
-    def add_event(case_no: int, activity_index: int, when: datetime, loop_no: int = 0) -> None:
+    def state_from_activity(activity: str) -> str:
+        for suffix in (
+            "Reactivated", "Reassigned", "Rescheduled", "Reissued", "Reopened", "Reconfigured",
+            "Completed", "Confirmed", "Accepted", "Approved", "Validated", "Released", "Received",
+            "Dispatched", "Administered", "Published", "Registered", "Installed", "Commissioned",
+            "Decommissioned", "Dismantled", "Recovered", "Certified", "Corrected", "Amended",
+            "Failed", "Rejected", "Denied", "Canceled", "Withdrawn", "Suspended", "Revoked",
+            "Closed", "Archived", "Issued", "Created", "Opened", "Started", "Passed", "Paid",
+            "Assigned", "Returned", "Frozen", "Thawed", "Destroyed", "Raised", "Filed", "Held",
+        ):
+            if activity.endswith(suffix):
+                return suffix.upper().replace(" ", "_")
+        return _safe_type(activity)
+
+    def next_time(current: datetime, case_no: int, position: int, activity_index: int, role: str) -> datetime:
+        # Deterministic but irregular waiting/service times. Human roles observe
+        # a weekday/day-shift calendar; technical roles can run continuously.
+        technical = role in {"TELEMETRY", "SOFTWARE", "PROCESS_OWNER"}
+        span = 18 * 60 if technical else 42 * 60
+        minutes = 25 + ((case_no * 97 + position * 53 + activity_index * 29) % span)
+        value = current + timedelta(minutes=minutes)
+        if not technical:
+            while value.weekday() >= 5:
+                value = (value + timedelta(days=1)).replace(hour=8, minute=(case_no + position) % 45)
+            if value.hour < 7:
+                value = value.replace(hour=7, minute=(case_no + position) % 45)
+            elif value.hour >= 19:
+                value = (value + timedelta(days=1)).replace(hour=8, minute=(case_no + position) % 45)
+                while value.weekday() >= 5:
+                    value += timedelta(days=1)
+        return value
+
+    def add_event(case_no: int, activity: str, when: datetime, route_step: dict[str, Any], position: int) -> None:
         nonlocal event_seq
         event_seq += 1
-        activity = s.activities[activity_index]
-        case_type = s.object_types[0]
-        second_type = s.object_types[(activity_index % (len(s.object_types) - 1)) + 1]
-        third_type = s.object_types[((activity_index + 7) % (len(s.object_types) - 1)) + 1]
+        activity_index = s.activities.index(activity)
+        subject = subject_type(s.slug, activity, s.object_types)
         case_oid = ensure_object(case_type, case_no)
-        second_oid = ensure_object(second_type, case_no)
-        related = [(case_oid, "primary"), (second_oid, "subject")]
-        if (event_seq + activity_index) % 5 < 2:
-            third_oid = ensure_object(third_type, case_no)
-            if third_oid not in {oid for oid, _ in related}:
-                related.append((third_oid, "context"))
+        subject_oid = ensure_object(subject, case_no)
+        related: list[tuple[str, str]] = [(case_oid, "primary")]
+        if subject_oid != case_oid:
+            related.append((subject_oid, "subject"))
+        for context_type in context_types(s.slug, subject):
+            context_oid = ensure_object(context_type, case_no)
+            if context_oid not in {oid for oid, _ in related}:
+                related.append((context_oid, "context"))
         eid = f"{s.prefix}-E-{event_seq:08d}"
+        role = actor_role(s.slug, activity)
+        actor_pool = 9 + (sum(map(ord, role)) % 13)
+        actor = f"{s.prefix}-{role}-{((case_no * 7 + activity_index * 3) % actor_pool) + 1:03d}"
+        money_words = ("Payment", "Invoice", "Reserve", "Estimate", "Fee", "Price", "Credit Memo", "Quotation", "Recovery")
+        quantity_words = ("Material", "Goods", "Sample", "Dose", "Shipment", "Module", "Battery", "Stock", "Receipt")
+        amount = round(125.0 + ((case_no * 43 + activity_index * 71) % 800000) / 100.0, 2) if any(word in activity for word in money_words) else None
+        quantity = round(1.0 + ((case_no * 17 + activity_index * 11) % 2500) / 10.0, 1) if any(word in activity for word in quantity_words) else None
+        lag_minutes = (case_no * 31 + position * 17 + activity_index * 23) % (72 * 60)
         event = {
             "ocel:eid": eid,
             "ocel:activity": activity,
@@ -194,18 +248,27 @@ def _build_canonical(s: Scenario, instance_count: int) -> tuple[list[dict[str, A
             "case_no": case_no,
             "activity_index": activity_index,
             "technical_code": _code(s, activity_index),
-            "actor": f"USR-{((case_no * 17 + activity_index) % 127) + 1:03d}",
+            "actor": actor,
+            "actor_role": role,
+            "resource_calendar": "24X7" if role in {"TELEMETRY", "SOFTWARE", "PROCESS_OWNER"} else "WEEKDAY_DAY_SHIFT",
             "source_system": f"{s.prefix}_SRC_{activity_index % 3 + 1}",
-            "reason": ("R0", "R1", "R2", "R3")[(case_no + activity_index) % 4],
-            "amount": round(75.0 + ((case_no * 29 + activity_index * 71) % 250000) / 100.0, 2),
+            "reason": route_step["exception_reason"],
+            "amount": amount,
+            "currency": "EUR" if amount is not None else None,
+            "quantity": quantity,
+            "unit": "EA" if quantity is not None else None,
             "location": ("BER", "HAM", "MUC", "CGN", "FRA")[(case_no + activity_index) % 5],
-            "old_value": f"S{max(0, activity_index - 1):03d}",
-            "new_value": f"S{activity_index:03d}",
-            "recorded_at": when + timedelta(hours=(case_no + activity_index) % 29),
-            "loop_no": loop_no,
+            "changed_field": "lifecycle_status",
+            "old_value": None,
+            "new_value": state_from_activity(activity),
+            "recorded_at": when + timedelta(minutes=lag_minutes),
+            "is_exception": bool(route_step["is_exception"]),
+            "exception_reason": route_step["exception_reason"],
+            "loop_no": 1 if route_step["is_exception"] else 0,
             "object_refs": [oid for oid, _ in related],
         }
         events.append(event)
+        subject_by_event[eid] = subject_oid
         for oid, qualifier in related:
             relations.append({
                 "ocel:eid": eid,
@@ -216,38 +279,43 @@ def _build_canonical(s: Scenario, instance_count: int) -> tuple[list[dict[str, A
                 "ocel:qualifier": qualifier,
             })
 
+    case_bounds: dict[int, tuple[datetime, datetime]] = {}
     for case_no in range(1, instance_count + 1):
-        case_start = base + timedelta(hours=case_no * 3)
-        for idx in range(len(s.activities)):
-            if (case_no + idx * 13) % _event_modulus(idx) == 0:
-                add_event(case_no, idx, case_start + timedelta(hours=idx * 6, minutes=(case_no + idx) % 53))
-        if case_no % 5 == 0:
-            loop_base = case_start + timedelta(hours=len(s.activities) * 6 + 1)
-            for loop_pos, activity in enumerate(s.loop_activities):
-                add_event(case_no, s.activities.index(activity), loop_base + timedelta(minutes=37 * loop_pos), loop_no=1)
+        jitter_hours = (case_no * case_no * 17 + case_no * 41) % 211
+        current = base + timedelta(hours=case_no * 5 + jitter_hours, minutes=(case_no * 37) % 60)
+        case_start = current
+        route = build_route(s.slug, case_no)
+        for position, route_step in enumerate(route):
+            activity = route_step["activity"]
+            if activity not in s.activities:
+                raise AssertionError(f"Unknown activity in {s.slug} route: {activity}")
+            idx = s.activities.index(activity)
+            if position:
+                current = next_time(current, case_no, position, idx, actor_role(s.slug, activity))
+            add_event(case_no, activity, current, route_step, position)
+        case_bounds[case_no] = (case_start, current)
 
-        root = ensure_object(s.object_types[0], case_no)
-        child_a = ensure_object(s.object_types[1], case_no)
-        child_b = ensure_object(s.object_types[min(4, len(s.object_types) - 1)], case_no)
-        o2o.append({"ocel:oid": root, "ocel:oid_2": child_a, "ocel:qualifier": "contains"})
-        o2o.append({"ocel:oid": root, "ocel:oid_2": child_b, "ocel:qualifier": "references"})
-        if case_no % 5 == 0:
-            replacement = ensure_object(s.object_types[min(5, len(s.object_types) - 1)], case_no)
-            o2o.append({"ocel:oid": root, "ocel:oid_2": replacement, "ocel:qualifier": "reassigned-to"})
-        changes.append({
-            "ocel:oid": root,
-            "ocel:type": s.object_types[0],
-            "ocel:timestamp": case_start,
-            "ocel:field": "lifecycle_status",
-            "lifecycle_status": "OPEN",
-        })
-        changes.append({
-            "ocel:oid": root,
-            "ocel:type": s.object_types[0],
-            "ocel:timestamp": case_start + timedelta(days=30),
-            "ocel:field": "lifecycle_status",
-            "lifecycle_status": "REVIEW" if case_no % 5 == 0 else "CLOSED",
-        })
+    # Business-semantic object relations with explicit validity intervals.
+    seen_o2o: set[tuple[str, str, str, str]] = set()
+    for case_no, (case_start, case_end) in case_bounds.items():
+        used = case_objects[case_no]
+        for source_type, target_type, qualifier in O2O_EDGES[s.slug]:
+            source = _object_id(s, source_type, case_no)
+            target = _object_id(s, target_type, case_no)
+            if source not in used or target not in used:
+                continue
+            key = (source, target, qualifier, _iso(case_start))
+            if key in seen_o2o:
+                continue
+            seen_o2o.add(key)
+            o2o.append({
+                "ocel:oid": source,
+                "ocel:oid_2": target,
+                "ocel:qualifier": qualifier,
+                "valid_from": case_start,
+                "valid_to": case_end,
+                "relation_state": "ACTIVE",
+            })
 
     events.sort(key=lambda e: (e["ocel:timestamp"], e["ocel:eid"]))
     # Re-number after chronological ordering so IDs are stable and ordered.
@@ -259,7 +327,24 @@ def _build_canonical(s: Scenario, instance_count: int) -> tuple[list[dict[str, A
         event["ocel:eid"] = new
     for relation in relations:
         relation["ocel:eid"] = remap[relation["ocel:eid"]]
+    subject_by_event = {remap[eid]: oid for eid, oid in subject_by_event.items()}
     relations.sort(key=lambda r: (r["ocel:eid"], r["ocel:oid"], r["ocel:qualifier"]))
+    # Derive semantically ordered old/new status values and temporal object
+    # attributes after global timestamp ordering (important for shared objects).
+    state_by_object: dict[str, str] = {}
+    for event in events:
+        subject_oid = subject_by_event[event["ocel:eid"]]
+        prior = state_by_object.get(subject_oid, "IDENTIFIED")
+        event["old_value"] = prior
+        state_by_object[subject_oid] = event["new_value"]
+        objects[subject_oid]["lifecycle_status"] = event["new_value"]
+        changes.append({
+            "ocel:oid": subject_oid,
+            "ocel:type": objects[subject_oid]["ocel:type"],
+            "ocel:timestamp": event["ocel:timestamp"],
+            "ocel:field": "lifecycle_status",
+            "lifecycle_status": event["new_value"],
+        })
     return events, objects, relations, o2o, changes
 
 
@@ -295,7 +380,7 @@ def _insert_forgeflow(conn: sqlite3.Connection, s: Scenario, events: list[dict[s
     for n, event in enumerate(events, 1):
         table = s.evidence_tables[event["activity_index"] % len(s.evidence_tables)]
         scope = _source_scope(s, event, table)
-        case_key = _object_id(s, s.object_types[0], event["case_no"], 0)
+        case_key = _object_id(s, CASE_TYPES[s.slug], event["case_no"])
         bridge.add((case_key, scope))
         rid = f"{s.prefix}-R-{n:08d}"
         when = event["ocel:timestamp"]
@@ -368,8 +453,8 @@ def _insert_trialversion(conn: sqlite3.Connection, s: Scenario, events: list[dic
         sessions.append((f"ES-{n:08d}", event["actor"], _iso(event["recorded_at"]), "SAVE", event["reason"]))
         rows[table].append((rid, logical_id, version_no, _iso(when), None, _iso(event["recorded_at"]), f"ES-{n:08d}", version_no - 1, "BUSINESS", event["reason"], event["actor"], 1, 0, f"H-{n:08d}", event["technical_code"], json.dumps(event["object_refs"]), event["actor"], event["amount"], event["location"], json.dumps({"effectiveAt": _iso(when)}, separators=(",", ":"))))
         last_record[key] = rid
-        case_key = _object_id(s, s.object_types[0], event["case_no"], 0)
-        relation_rows[(logical_id, case_key)] = (f"REL-{logical_id}", "VersionedRecord", logical_id, s.object_types[0], case_key, "SCOPE", "2022-01-01T00:00:00Z", None, "2022-01-01T00:00:01Z", "ES-REL", "BUSINESS")
+        case_key = _object_id(s, CASE_TYPES[s.slug], event["case_no"])
+        relation_rows[(logical_id, case_key)] = (f"REL-{logical_id}", "VersionedRecord", logical_id, CASE_TYPES[s.slug], case_key, "SCOPE", "2022-01-01T00:00:00Z", None, "2022-01-01T00:00:01Z", "ES-REL", "BUSINESS")
         if n % 3 == 0:
             versions[key] += 1
             correction_no = versions[key]
@@ -395,12 +480,14 @@ def _insert_procurechange(conn: sqlite3.Connection, s: Scenario, events: list[di
     archive_h = []
     archive_p = []
     app_rows: dict[str, list[tuple[Any, ...]]] = defaultdict(list)
-    flow: set[tuple[str, str]] = set()
+    flow: set[tuple[str, str, str]] = set()
     for n, event in enumerate(events, 1):
         use_change = event["activity_index"] < len(s.activities) // 2
-        scope = f"{s.prefix}-DOC-{event['case_no']:06d}-{event['activity_index'] % 11:02d}"
-        case_key = _object_id(s, s.object_types[0], event["case_no"], 0)
-        flow.add((case_key, scope))
+        scope = f"{s.prefix}-DOC-{n:010d}"
+        case_key = _object_id(s, CASE_TYPES[s.slug], event["case_no"])
+        flow.add((case_key, scope, "FOLLOW_ON"))
+        for object_ref in event["object_refs"]:
+            flow.add((scope, object_ref, "OBJECT_SCOPE"))
         when = event["ocel:timestamp"]
         refs = json.dumps(event["object_refs"], separators=(",", ":"))
         if use_change:
@@ -425,7 +512,7 @@ def _insert_procurechange(conn: sqlite3.Connection, s: Scenario, events: list[di
     conn.executemany("INSERT INTO cdpos(client,object_class,object_id,change_number,table_name,table_key,field_name,change_indicator,old_value_text,new_value_text,old_unit,new_unit,currency_code,value_type_code) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)", cdpos)
     conn.executemany("INSERT INTO archive_cdhdr(client,object_class,object_id,change_number,username,change_date,change_time,transaction_code,change_indicator,source_system) VALUES(?,?,?,?,?,?,?,?,?,?)", archive_h)
     conn.executemany("INSERT INTO archive_cdpos(client,object_class,object_id,change_number,table_name,table_key,field_name,change_indicator,old_value_text,new_value_text,old_unit,new_unit,currency_code,value_type_code) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)", archive_p)
-    conn.executemany("INSERT INTO document_flow(predecessor_id,successor_id,relation_code,created_at) VALUES(?,?,'FOLLOW_ON','2022-01-01T00:00:00Z')", sorted(flow))
+    conn.executemany("INSERT INTO document_flow(predecessor_id,successor_id,relation_code,created_at) VALUES(?,?,?,'2022-01-01T00:00:00Z')", sorted(flow))
     for table, table_rows in app_rows.items():
         conn.executemany(f"INSERT INTO {table}(record_key,document_ref,document_code,posting_date,posting_time,username,amount_value,location_code,related_refs_json,transaction_ref,is_reversal) VALUES(?,?,?,?,?,?,?,?,?,?,?)", table_rows)
     conn.execute("INSERT INTO tabkey_layout(table_name,component_no,field_name,start_pos,field_length,data_type) VALUES('PO_ITEM',1,'CLIENT',1,3,'CHAR'),('PO_ITEM',2,'DOCNO',4,10,'NUMC'),('PO_ITEM',3,'ITEMNO',14,5,'NUMC')")
@@ -437,12 +524,13 @@ def _insert_procurechange(conn: sqlite3.Connection, s: Scenario, events: list[di
 def _claim_payload(event: dict[str, Any], version: int) -> str:
     effective = _iso(event["ocel:timestamp"])
     base = {"claimRef": event["object_refs"][0], "objectRefs": event["object_refs"], "effectiveAt": effective}
-    if version == 1:
-        base.update({"amount": int(round(event["amount"] * 100)), "currency": "EUR_CENTS"})
-    elif version == 2:
-        base.update({"amount": event["amount"], "currency": "EUR"})
-    else:
-        base.update({"money": {"value": f"{event['amount']:.2f}", "currency": "EUR"}})
+    if event["amount"] is not None:
+        if version == 1:
+            base.update({"amount": int(round(event["amount"] * 100)), "currency": "EUR_CENTS"})
+        elif version == 2:
+            base.update({"amount": event["amount"], "currency": "EUR"})
+        else:
+            base.update({"money": {"value": f"{event['amount']:.2f}", "currency": "EUR"}})
     return json.dumps(base, separators=(",", ":"), sort_keys=True)
 
 
@@ -523,15 +611,23 @@ def _insert_permitflow(conn: sqlite3.Connection, s: Scenario, events: list[dict[
     instances = []
     executions = []
     variables = []
+    event_bounds: dict[int, tuple[datetime, datetime]] = {}
+    by_case: dict[int, list[datetime]] = defaultdict(list)
+    for event in events:
+        by_case[event["case_no"]].append(event["ocel:timestamp"])
+    for case_no, timestamps in by_case.items():
+        event_bounds[case_no] = (min(timestamps) - timedelta(hours=1), max(timestamps))
     for case_no in range(1, instance_count + 1):
         version = case_no % 3 + 1
         pi = f"PI-{case_no:06d}"
         ex = f"EX-{case_no:06d}"
-        root = _object_id(s, s.object_types[0], case_no, 0)
-        instances.append((pi, f"DEF-{version}", pi, None, f"2023-01-{case_no % 28 + 1:02d}T00:00:00Z", None, "ACTIVE"))
-        executions.append((ex, None, pi, pi, None, "ROOT", 1, 0, f"2023-01-{case_no % 28 + 1:02d}T00:00:00Z", None, None))
-        variables.append((f"VAR-{case_no:06d}-1", ex, pi, "application_ref", 1, root, "TEXT", f"2023-01-{case_no % 28 + 1:02d}T00:00:00Z", None))
-        variables.append((f"VAR-{case_no:06d}-2", ex, pi, "plan_revision_ref", 1, f"PLAN-{case_no:06d}-1", "TEXT", f"2023-01-{case_no % 28 + 1:02d}T00:00:00Z", None))
+        root = _object_id(s, CASE_TYPES[s.slug], case_no)
+        started, ended = event_bounds[case_no]
+        started_text = _iso(started)
+        instances.append((pi, f"DEF-{version}", pi, None, started_text, _iso(ended), "COMPLETED"))
+        executions.append((ex, None, pi, pi, None, "ROOT", 1, 0, started_text, _iso(ended), None))
+        variables.append((f"VAR-{case_no:06d}-1", ex, pi, "application_ref", 1, root, "TEXT", started_text, None))
+        variables.append((f"VAR-{case_no:06d}-2", ex, pi, "plan_revision_ref", 1, f"PLAN-{case_no:06d}-1", "TEXT", started_text, None))
     conn.executemany("INSERT INTO wf_process_instance(process_instance_id,process_definition_id,root_process_instance_id,super_process_instance_id,start_time,end_time,state_code) VALUES(?,?,?,?,?,?,?)", instances)
     conn.executemany("INSERT INTO wf_execution(execution_id,parent_execution_id,process_instance_id,root_process_instance_id,super_process_instance_id,activity_id,is_scope,is_concurrent,created_at,ended_at,delete_reason) VALUES(?,?,?,?,?,?,?,?,?,?,?)", executions)
     conn.executemany("INSERT INTO wf_variable_history(variable_id,execution_id,process_instance_id,name,revision_no,value_text,value_type,created_at,ended_at) VALUES(?,?,?,?,?,?,?,?,?)", variables)
@@ -542,7 +638,7 @@ def _insert_permitflow(conn: sqlite3.Connection, s: Scenario, events: list[dict[
     submissions = {}
     for event in events:
         if event["ocel:activity"] == "Application Submitted":
-            app_ref = _object_id(s, s.object_types[0], event["case_no"], 0)
+            app_ref = _object_id(s, CASE_TYPES[s.slug], event["case_no"])
             submissions[app_ref] = (app_ref, "SUBMITTED", _iso(event["ocel:timestamp"]), _iso(event["recorded_at"]))
     conn.executemany("INSERT INTO permit_application(application_ref,current_state_code,submitted_at,updated_at) VALUES(?,?,?,?)", submissions.values())
 
@@ -560,7 +656,7 @@ def _insert_permitflow(conn: sqlite3.Connection, s: Scenario, events: list[dict[
         if table == "wf_activity_history":
             rows[table].append(base + (when, when, "COMPLETE"))
         elif table == "wf_task_history":
-            rows[table].append(base + (when, _iso(event["ocel:timestamp"] + timedelta(minutes=15)), "OK", None))
+            rows[table].append(base + (_iso(event["ocel:timestamp"] - timedelta(minutes=15)), when, "OK", None))
         elif table == "wf_message_delivery":
             rows[table].append(base + (when, f"MSG-{event['activity_index'] % 13:02d}", "CORRELATED"))
         elif table == "wf_form_submission":
@@ -600,9 +696,7 @@ def _insert_batteryvault(conn: sqlite3.Connection, s: Scenario, events: list[dic
     journals = []
     entries = []
     for n, event in enumerate(events, 1):
-        pack_key = _object_id(s, s.object_types[0], event["case_no"], 0)
-        # The canonical case object is CellBatch by catalogue order; events also
-        # carry BatteryPack objects. The operational root is the first related hub.
+        # The operational root and canonical case is the BatteryPack hub.
         parent_key = event["object_refs"][0]
         when = event["ocel:timestamp"]
         refs = json.dumps(event["object_refs"], separators=(",", ":"))
@@ -626,7 +720,7 @@ def _insert_batteryvault(conn: sqlite3.Connection, s: Scenario, events: list[dic
         conn.executemany(f"INSERT INTO {table}{sat_sql}", rows)
     conn.executemany("INSERT INTO asset_journal(journal_id,movement_code,effective_at,posted_at,source_system,status_code,related_refs_json,actor_code,location_code,amount_value) VALUES(?,?,?,?,?,?,?,?,?,?)", journals)
     conn.executemany("INSERT INTO asset_ledger_entry(entry_id,journal_id,account_type,account_id,asset_type,asset_hub_key,direction,quantity,effective_at,posted_at,reversal_of_entry_id,source_system) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)", entries)
-    _pad_simple(conn, "sat_telemetry_summary", "INSERT INTO sat_telemetry_summary(satellite_id,parent_key,load_dts,effective_from,effective_to,hashdiff,record_source,source_sequence,is_correction,state_code,related_refs_json,actor_code,amount_value,location_code) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)", lambda i: (f"TEL-{i:09d}", _object_id(s, s.object_types[0], i % instance_count + 1, 0), "2024-01-01T01:00:00Z", "2024-01-01T00:00:00Z", None, f"TEL-HD-{i % 997}", "TELEMETRY", i, 0, "NORMAL", "[]", "SENSOR", float(i % 100), f"Z{i % 9}"))
+    _pad_simple(conn, "sat_telemetry_summary", "INSERT INTO sat_telemetry_summary(satellite_id,parent_key,load_dts,effective_from,effective_to,hashdiff,record_source,source_sequence,is_correction,state_code,related_refs_json,actor_code,amount_value,location_code) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)", lambda i: (f"TEL-{i:09d}", _object_id(s, CASE_TYPES[s.slug], i % instance_count + 1), "2024-01-01T01:00:00Z", "2024-01-01T00:00:00Z", None, f"TEL-HD-{i % 997}", "TELEMETRY", i, 0, "NORMAL", "[]", "SENSOR", float(i % 100), f"Z{i % 9}"))
     return _battery_query(s)
 
 
@@ -656,25 +750,25 @@ def _forge_query(s: Scenario) -> str:
         "SELECT record_key, fulfilment_ref, milestone_code, strftime('%Y-%m-%dT%H:%M:%SZ',milestone_epoch,'unixepoch'), operator_code, related_refs_json, 'fulfilment_record' FROM fulfilment_record",
         "SELECT record_key, posting_ref, posting_code, substr(effective_day,1,10)||'T'||substr(effective_clock,1,2)||':'||substr(effective_clock,3,2)||':'||substr(effective_clock,5,2)||'Z', operator_code, related_refs_json, 'finance_posting' FROM finance_posting",
     ]
-    return f"WITH raw(source_record_id,scope_key,technical_code,timestamp,actor,object_refs,source_table) AS ({' UNION ALL '.join(unions)}), mapped AS (SELECT *, {mapping} activity FROM raw) SELECT dc.predecessor_key case_id, activity, timestamp, source_table, source_record_id, actor, object_refs FROM mapped JOIN document_conversion dc ON dc.successor_key=mapped.scope_key WHERE activity IS NOT NULL ORDER BY timestamp, source_record_id"
+    return f"WITH raw(source_record_id,scope_key,technical_code,timestamp,actor,object_refs,source_table) AS ({' UNION ALL '.join(unions)}), mapped AS (SELECT *, {mapping} activity FROM raw) SELECT dc.predecessor_key case_id, activity, timestamp, source_table, source_record_id, actor, object_refs FROM mapped JOIN document_conversion dc ON dc.successor_key=mapped.scope_key WHERE activity IS NOT NULL ORDER BY case_id, timestamp, source_record_id"
 
 
 def _trial_query(s: Scenario) -> str:
     mapping = _mapping_case(s, "state_code")
     unions = [f"SELECT record_id, logical_id, version_no, valid_from, recorded_at, change_kind, state_code, changed_by, related_refs_json, '{table}' source_table, LAG(state_code) OVER(PARTITION BY logical_id ORDER BY version_no) prev_state FROM {table}" for table in s.evidence_tables]
-    return f"WITH versions AS ({' UNION ALL '.join(unions)}), business AS (SELECT *, {mapping} activity FROM versions WHERE change_kind='BUSINESS') SELECT r.target_logical_id case_id, business.activity, business.valid_from timestamp, business.source_table, business.record_id source_record_id, business.changed_by actor, business.related_refs_json object_refs FROM business JOIN object_relation_v r ON r.source_logical_id=business.logical_id AND r.change_kind='BUSINESS' WHERE business.activity IS NOT NULL ORDER BY timestamp, source_record_id"
+    return f"WITH versions AS ({' UNION ALL '.join(unions)}), business AS (SELECT *, {mapping} activity FROM versions WHERE change_kind='BUSINESS') SELECT r.target_logical_id case_id, business.activity, business.valid_from timestamp, business.source_table, business.record_id source_record_id, business.changed_by actor, business.related_refs_json object_refs FROM business JOIN object_relation_v r ON r.source_logical_id=business.logical_id AND r.change_kind='BUSINESS' WHERE business.activity IS NOT NULL ORDER BY case_id, timestamp, source_record_id"
 
 
 def _procure_query(s: Scenario) -> str:
     mapping_change = _mapping_case(s, "technical_code")
     mapping_app = _mapping_case(s, "document_code")
     app_union = " UNION ALL ".join(f"SELECT record_key source_record_id, document_ref scope_key, document_code, substr(posting_date,1,4)||'-'||substr(posting_date,5,2)||'-'||substr(posting_date,7,2)||'T'||substr(posting_time,1,2)||':'||substr(posting_time,3,2)||':'||substr(posting_time,5,2)||'Z' timestamp, username actor, related_refs_json object_refs, '{table}' source_table FROM {table}" for table in APP_TABLES)
-    return f"WITH all_h AS (SELECT *,0 archived FROM cdhdr UNION ALL SELECT *,1 FROM archive_cdhdr), dedup_h AS (SELECT * FROM (SELECT *,ROW_NUMBER() OVER(PARTITION BY change_number ORDER BY archived) rn FROM all_h) WHERE rn=1), all_p AS (SELECT * FROM cdpos UNION ALL SELECT * FROM archive_cdpos), changes AS (SELECT h.change_number source_record_id,h.object_id scope_key,MAX(CASE WHEN p.field_name LIKE '{s.prefix}%' THEN p.field_name END) technical_code,substr(h.change_date,1,4)||'-'||substr(h.change_date,5,2)||'-'||substr(h.change_date,7,2)||'T'||substr(h.change_time,1,2)||':'||substr(h.change_time,3,2)||':'||substr(h.change_time,5,2)||'Z' timestamp,h.username actor,json_array(h.object_id) object_refs,'cdhdr' source_table FROM dedup_h h JOIN all_p p USING(client,object_class,object_id,change_number) GROUP BY h.change_number,h.object_id,h.change_date,h.change_time,h.username), mapped_changes AS (SELECT *,{mapping_change} activity FROM changes), apps AS ({app_union}), mapped_apps AS (SELECT *,{mapping_app} activity FROM apps), all_events AS (SELECT * FROM mapped_changes UNION ALL SELECT source_record_id,scope_key,document_code,timestamp,actor,object_refs,source_table,activity FROM mapped_apps) SELECT f.predecessor_id case_id,e.activity,e.timestamp,e.source_table,e.source_record_id,e.actor,e.object_refs FROM all_events e JOIN document_flow f ON f.successor_id=e.scope_key WHERE activity IS NOT NULL ORDER BY timestamp,source_record_id"
+    return f"WITH all_h AS (SELECT *,0 archived FROM cdhdr UNION ALL SELECT *,1 FROM archive_cdhdr), dedup_h AS (SELECT * FROM (SELECT *,ROW_NUMBER() OVER(PARTITION BY change_number ORDER BY archived) rn FROM all_h) WHERE rn=1), all_p AS (SELECT * FROM cdpos UNION ALL SELECT * FROM archive_cdpos), scope_refs AS (SELECT predecessor_id scope_key,json_group_array(successor_id) object_refs FROM document_flow WHERE relation_code='OBJECT_SCOPE' GROUP BY predecessor_id), changes AS (SELECT h.change_number source_record_id,h.object_id scope_key,MAX(CASE WHEN p.field_name LIKE '{s.prefix}%' THEN p.field_name END) technical_code,substr(h.change_date,1,4)||'-'||substr(h.change_date,5,2)||'-'||substr(h.change_date,7,2)||'T'||substr(h.change_time,1,2)||':'||substr(h.change_time,3,2)||':'||substr(h.change_time,5,2)||'Z' timestamp,h.username actor,sr.object_refs,'cdhdr' source_table FROM dedup_h h JOIN all_p p USING(client,object_class,object_id,change_number) JOIN scope_refs sr ON sr.scope_key=h.object_id GROUP BY h.change_number,h.object_id,h.change_date,h.change_time,h.username,sr.object_refs), mapped_changes AS (SELECT *,{mapping_change} activity FROM changes), apps AS ({app_union}), mapped_apps AS (SELECT *,{mapping_app} activity FROM apps), all_events AS (SELECT * FROM mapped_changes UNION ALL SELECT source_record_id,scope_key,document_code,timestamp,actor,object_refs,source_table,activity FROM mapped_apps) SELECT f.predecessor_id case_id,e.activity,e.timestamp,e.source_table,e.source_record_id,e.actor,e.object_refs FROM all_events e JOIN document_flow f ON f.successor_id=e.scope_key AND f.relation_code='FOLLOW_ON' WHERE activity IS NOT NULL ORDER BY case_id,timestamp,source_record_id"
 
 
 def _claim_query(s: Scenario) -> str:
     mapping = _mapping_case(s, "semantic_code")
-    return f"WITH raw AS (SELECT CAST(e.global_position AS TEXT) source_record_id,a.semantic_code,json_extract(e.payload_json,'$.claimRef') case_id,json_extract(e.payload_json,'$.effectiveAt') timestamp,json_extract(e.metadata_json,'$.actor') actor,json_extract(e.payload_json,'$.objectRefs') object_refs,'event_store' source_table,e.correlation_id FROM event_store e JOIN event_type_alias a USING(event_type,schema_version) WHERE e.stream_type<>'TECHNICAL' UNION ALL SELECT result_id,semantic_code,json_extract(payload_json,'$.claimRef'),json_extract(payload_json,'$.effectiveAt'),actor_code,json_extract(payload_json,'$.objectRefs'),'command_result',correlation_id FROM command_result WHERE result_code='APPLIED' UNION ALL SELECT message_id,semantic_code,json_extract(payload_json,'$.claimRef'),json_extract(payload_json,'$.effectiveAt'),'EXTERNAL',json_extract(payload_json,'$.objectRefs'),'inbox_message',correlation_id FROM inbox_message WHERE processed_flag=1 UNION ALL SELECT document_id,semantic_code,json_extract(payload_json,'$.claimRef'),json_extract(payload_json,'$.effectiveAt'),'INDEXER',json_extract(payload_json,'$.objectRefs'),'document_index',correlation_id FROM document_index WHERE index_status='ACTIVE'), fused AS (SELECT *,ROW_NUMBER() OVER(PARTITION BY correlation_id,semantic_code ORDER BY CASE source_table WHEN 'event_store' THEN 1 ELSE 2 END,source_record_id) rn FROM raw), mapped AS (SELECT *,{mapping} activity FROM fused WHERE rn=1) SELECT case_id,activity,timestamp,source_table,source_record_id,actor,object_refs FROM mapped WHERE activity IS NOT NULL ORDER BY timestamp,source_record_id"
+    return f"WITH raw AS (SELECT CAST(e.global_position AS TEXT) source_record_id,a.semantic_code,json_extract(e.payload_json,'$.claimRef') case_id,json_extract(e.payload_json,'$.effectiveAt') timestamp,json_extract(e.metadata_json,'$.actor') actor,json_extract(e.payload_json,'$.objectRefs') object_refs,'event_store' source_table,e.correlation_id FROM event_store e JOIN event_type_alias a USING(event_type,schema_version) WHERE e.stream_type<>'TECHNICAL' UNION ALL SELECT result_id,semantic_code,json_extract(payload_json,'$.claimRef'),json_extract(payload_json,'$.effectiveAt'),actor_code,json_extract(payload_json,'$.objectRefs'),'command_result',correlation_id FROM command_result WHERE result_code='APPLIED' UNION ALL SELECT message_id,semantic_code,json_extract(payload_json,'$.claimRef'),json_extract(payload_json,'$.effectiveAt'),'EXTERNAL',json_extract(payload_json,'$.objectRefs'),'inbox_message',correlation_id FROM inbox_message WHERE processed_flag=1 UNION ALL SELECT document_id,semantic_code,json_extract(payload_json,'$.claimRef'),json_extract(payload_json,'$.effectiveAt'),'INDEXER',json_extract(payload_json,'$.objectRefs'),'document_index',correlation_id FROM document_index WHERE index_status='ACTIVE'), fused AS (SELECT *,ROW_NUMBER() OVER(PARTITION BY correlation_id,semantic_code ORDER BY CASE source_table WHEN 'event_store' THEN 1 ELSE 2 END,CASE WHEN source_table='event_store' THEN printf('%020d',CAST(source_record_id AS INTEGER)) ELSE source_record_id END) rn FROM raw), mapped AS (SELECT *,{mapping} activity FROM fused WHERE rn=1) SELECT case_id,activity,timestamp,source_table,source_record_id,actor,object_refs FROM mapped WHERE activity IS NOT NULL ORDER BY case_id,timestamp,source_record_id"
 
 
 def _permit_query(s: Scenario) -> str:
@@ -686,23 +780,48 @@ def _permit_query(s: Scenario) -> str:
         "SELECT submission_id,execution_id,process_definition_id,activity_id,submitted_at,submitted_by,related_refs_json,'wf_form_submission' FROM wf_form_submission",
         "SELECT external_task_id,execution_id,process_definition_id,activity_id,completed_at,worker_code,related_refs_json,'wf_external_task' FROM wf_external_task WHERE state_code='COMPLETED' AND error_code IS NULL",
     ]
-    return f"WITH raw AS ({' UNION ALL '.join(unions)}), scoped AS (SELECT raw.*,m.semantic_code,(SELECT v.value_text FROM wf_variable_history v WHERE v.execution_id=raw.execution_id AND v.name='application_ref' AND v.created_at<=raw.timestamp ORDER BY v.revision_no DESC LIMIT 1) case_id FROM raw JOIN wf_definition_metadata m USING(process_definition_id,activity_id)), mapped AS (SELECT *,{mapping} activity FROM scoped) SELECT case_id,activity,timestamp,source_table,source_record_id,actor,object_refs FROM mapped WHERE activity IS NOT NULL ORDER BY timestamp,source_record_id"
+    return f"WITH raw AS ({' UNION ALL '.join(unions)}), scoped AS (SELECT raw.*,m.semantic_code,(SELECT v.value_text FROM wf_variable_history v WHERE v.execution_id=raw.execution_id AND v.name='application_ref' AND v.created_at<=raw.timestamp ORDER BY v.revision_no DESC LIMIT 1) case_id FROM raw JOIN wf_definition_metadata m USING(process_definition_id,activity_id)), mapped AS (SELECT *,{mapping} activity FROM scoped) SELECT case_id,activity,timestamp,source_table,source_record_id,actor,object_refs FROM mapped WHERE activity IS NOT NULL ORDER BY case_id,timestamp,source_record_id"
 
 
 def _battery_query(s: Scenario) -> str:
     mapping = _mapping_case(s, "state_code")
     satellites = [table for table in s.evidence_tables if table != "asset_journal"]
     union = " UNION ALL ".join(f"SELECT satellite_id source_record_id,parent_key,load_dts,effective_from,state_code,related_refs_json object_refs,actor_code actor,'{table}' source_table,is_correction,hashdiff,ROW_NUMBER() OVER(PARTITION BY parent_key,hashdiff ORDER BY is_correction,load_dts) duplicate_no FROM {table}" for table in satellites)
-    return f"WITH sat AS ({union}), sat_mapped AS (SELECT source_record_id,parent_key,effective_from timestamp,state_code,object_refs,actor,source_table,{mapping} activity FROM sat WHERE is_correction=0 AND duplicate_no=1), ledger AS (SELECT j.journal_id source_record_id,e.asset_hub_key parent_key,j.effective_at timestamp,j.movement_code state_code,j.related_refs_json object_refs,j.actor_code actor,'asset_journal' source_table,{_mapping_case(s, 'j.movement_code')} activity FROM asset_journal j JOIN asset_ledger_entry e ON e.journal_id=j.journal_id GROUP BY j.journal_id HAVING SUM(CASE e.direction WHEN 'DEBIT' THEN e.quantity ELSE -e.quantity END)=0), all_events AS (SELECT * FROM sat_mapped UNION ALL SELECT * FROM ledger) SELECT h.business_key case_id,activity,timestamp,source_table,source_record_id,actor,object_refs FROM all_events e JOIN hub_cell_batch h ON h.hub_key=e.parent_key WHERE activity IS NOT NULL ORDER BY timestamp,source_record_id"
+    return f"WITH sat AS ({union}), sat_mapped AS (SELECT source_record_id,parent_key,effective_from timestamp,state_code,object_refs,actor,source_table,{mapping} activity FROM sat WHERE is_correction=0 AND duplicate_no=1), ledger AS (SELECT j.journal_id source_record_id,e.asset_hub_key parent_key,j.effective_at timestamp,j.movement_code state_code,j.related_refs_json object_refs,j.actor_code actor,'asset_journal' source_table,{_mapping_case(s, 'j.movement_code')} activity FROM asset_journal j JOIN asset_ledger_entry e ON e.journal_id=j.journal_id GROUP BY j.journal_id HAVING SUM(CASE e.direction WHEN 'DEBIT' THEN e.quantity ELSE -e.quantity END)=0), all_events AS (SELECT * FROM sat_mapped UNION ALL SELECT * FROM ledger) SELECT h.hub_key case_id,activity,timestamp,source_table,source_record_id,actor,object_refs FROM all_events e JOIN hub_battery_pack h ON h.hub_key=e.parent_key WHERE activity IS NOT NULL ORDER BY case_id,timestamp,source_record_id"
 
 
-def _write_case_views(conn: sqlite3.Connection, folder: Path, base_query: str, loop_activities: Iterable[str]) -> list[dict[str, Any]]:
+def _write_case_views(conn: sqlite3.Connection, folder: Path, base_query: str, s: Scenario, events: list[dict[str, Any]]) -> list[dict[str, Any]]:
     views = folder / "case_views"
     views.mkdir(exist_ok=True)
+    exception_activities = sorted({event["ocel:activity"] for event in events if event["is_exception"]})
+    exception_sql = ",".join(_sql(activity) for activity in exception_activities)
+    exception_flag = f"CASE WHEN activity IN ({exception_sql}) THEN 1 ELSE 0 END"
+    secondary_prefix = f"{s.prefix}-{_safe_type(SECONDARY_CASE_TYPES[s.slug])}-*"
     specs = [
-        ("primary_cases", base_query),
-        ("exception_cases", f"SELECT * FROM ({base_query}) WHERE activity IN ({','.join(_sql(a) for a in loop_activities)}) ORDER BY timestamp,source_record_id"),
-        ("multi_object_cases", f"SELECT * FROM ({base_query}) WHERE json_array_length(object_refs)>=3 ORDER BY timestamp,source_record_id"),
+        (
+            "primary_cases",
+            f"SELECT base.*,{exception_flag} is_exception_event FROM ({base_query}) base "
+            "ORDER BY case_id,timestamp,source_record_id",
+        ),
+        (
+            "exception_cases",
+            f"WITH base AS ({base_query}), selected AS (SELECT DISTINCT case_id FROM base WHERE activity IN ({exception_sql})) "
+            f"SELECT base.*,{exception_flag} is_exception_event FROM base JOIN selected USING(case_id) "
+            "ORDER BY case_id,timestamp,source_record_id",
+        ),
+        (
+            "multi_object_cases",
+            f"WITH base AS ({base_query}), selected AS (SELECT DISTINCT case_id FROM base WHERE json_array_length(object_refs)>=3) "
+            "SELECT base.*,CASE WHEN json_array_length(object_refs)>=3 THEN 1 ELSE 0 END is_multi_object_event "
+            "FROM base JOIN selected USING(case_id) ORDER BY case_id,timestamp,source_record_id",
+        ),
+        (
+            "secondary_object_cases",
+            f"WITH base AS ({base_query}), expanded AS (SELECT j.value case_id,base.activity,base.timestamp,base.source_table,"
+            "base.source_record_id,base.actor,base.object_refs,base.case_id primary_case_id "
+            f"FROM base,json_each(base.object_refs) j WHERE j.value GLOB {_sql(secondary_prefix)}) "
+            "SELECT * FROM expanded ORDER BY case_id,timestamp,source_record_id",
+        ),
     ]
     reports = []
     for name, query in specs:
@@ -712,6 +831,10 @@ def _write_case_views(conn: sqlite3.Connection, folder: Path, base_query: str, l
         cur = conn.execute(query)
         header = [col[0] for col in cur.description]
         count = 0
+        case_idx = header.index("case_id")
+        timestamp_idx = header.index("timestamp")
+        source_idx = header.index("source_record_id")
+        previous_sort_key: tuple[str, str, str] | None = None
         with csv_path.open("w", encoding="utf-8", newline="") as handle:
             writer = csv.writer(handle, lineterminator="\n")
             writer.writerow(header)
@@ -719,14 +842,31 @@ def _write_case_views(conn: sqlite3.Connection, folder: Path, base_query: str, l
                 rows = cur.fetchmany(10000)
                 if not rows:
                     break
+                for row in rows:
+                    sort_key = (str(row[case_idx]), str(row[timestamp_idx]), str(row[source_idx]))
+                    if previous_sort_key is not None and sort_key < previous_sort_key:
+                        raise AssertionError(f"{s.slug}/{name} is not sorted by case_id, timestamp, source_record_id")
+                    previous_sort_key = sort_key
                 writer.writerows(rows)
                 count += len(rows)
-        reports.append({"name": name, "sql": f"case_views/{name}.sql", "csv": f"case_views/{name}.csv", "rows": count})
+        reports.append({
+            "name": name,
+            "case_type": CASE_TYPES[s.slug] if name != "secondary_object_cases" else SECONDARY_CASE_TYPES[s.slug],
+            "sql": f"case_views/{name}.sql",
+            "csv": f"case_views/{name}.csv",
+            "rows": count,
+            "sort_order": ["case_id", "timestamp", "source_record_id"],
+        })
     return reports
 
 
 def _write_ocel(folder: Path, events: list[dict[str, Any]], objects: dict[str, dict[str, Any]], relations: list[dict[str, Any]], o2o: list[dict[str, Any]], changes: list[dict[str, Any]]) -> None:
-    event_columns = ["ocel:eid", "ocel:activity", "ocel:timestamp", "actor", "source_system", "reason", "amount", "location", "old_value", "new_value", "source_table", "source_record_id", "recorded_at"]
+    event_columns = [
+        "ocel:eid", "ocel:activity", "ocel:timestamp", "actor", "actor_role", "resource_calendar",
+        "source_system", "reason", "amount", "currency", "quantity", "unit", "location",
+        "changed_field", "old_value", "new_value", "is_exception", "exception_reason",
+        "source_table", "source_record_id", "recorded_at",
+    ]
     event_df = pd.DataFrame([{key: event[key] for key in event_columns} for event in events])
     object_df = pd.DataFrame(list(objects.values()))
     relation_df = pd.DataFrame(relations)
@@ -768,16 +908,22 @@ def _source_contains_activity(conn: sqlite3.Connection, activities: Iterable[str
 def _validate(s: Scenario, folder: Path, conn: sqlite3.Connection, events: list[dict[str, Any]], objects: dict[str, dict[str, Any]], relations: list[dict[str, Any]], o2o: list[dict[str, Any]], changes: list[dict[str, Any]], instance_count: int, views: list[dict[str, Any]]) -> dict[str, Any]:
     frequency = Counter(e["ocel:activity"] for e in events)
     rel_by_event: dict[str, set[str]] = defaultdict(set)
-    case_activity: dict[int, Counter[str]] = defaultdict(Counter)
     for relation in relations:
         rel_by_event[relation["ocel:eid"]].add(relation["ocel:type"])
-    for event in events:
-        case_activity[event["case_no"]][event["ocel:activity"]] += 1
     event_case = {event["ocel:eid"]: event["case_no"] for event in events}
     object_cases: dict[str, set[int]] = defaultdict(set)
     for relation in relations:
         object_cases[relation["ocel:oid"]].add(event_case[relation["ocel:eid"]])
     shared_object_fraction = sum(len(case_ids) > 1 for case_ids in object_cases.values()) / len(object_cases)
+    transactional_sharing_violations = sum(
+        len(object_cases[oid]) > 1
+        for oid, obj in objects.items()
+        if obj["object_category"] == "TRANSACTIONAL"
+    )
+    shared_master_objects = [
+        oid for oid, obj in objects.items()
+        if obj["object_category"] == "SHARED_MASTER" and len(object_cases[oid]) > 1
+    ]
     activity_sources: dict[str, set[str]] = defaultdict(set)
     for event in events:
         activity_sources[event["source_table"]].add(event["ocel:activity"])
@@ -792,30 +938,134 @@ def _validate(s: Scenario, folder: Path, conn: sqlite3.Connection, events: list[
     }
     duplicate_evidence_present = bool(conn.execute(duplicate_queries[s.slug]).fetchone()[0])
     multi_count = sum(1 for event in events if len(rel_by_event[event["ocel:eid"]]) >= 3)
-    # A loop/rework path is explicit generator state. It need not repeat the
-    # same label: rejection -> rework -> completion is also a genuine loop.
     loop_case_ids = {event["case_no"] for event in events if event["loop_no"] > 0}
     loop_cases = len(loop_case_ids)
     object_ids = set(objects)
+    referenced_types = {relation["ocel:type"] for relation in relations}
+    change_types = {change["ocel:type"] for change in changes}
+
+    case_traces: dict[int, list[str]] = defaultdict(list)
+    for event in events:
+        case_traces[event["case_no"]].append(event["ocel:activity"])
+    coherent_route_count = sum(
+        case_traces[case_no] == [step["activity"] for step in build_route(s.slug, case_no)]
+        for case_no in range(1, instance_count + 1)
+    )
+
+    actor_roles: dict[str, set[str]] = defaultdict(set)
+    for event in events:
+        actor_roles[event["actor"]].add(event["actor_role"])
+    role_count = len({event["actor_role"] for event in events})
+    role_specialization = all(len(roles) == 1 for roles in actor_roles.values()) and all(
+        f"-{event['actor_role']}-" in event["actor"]
+        and event["resource_calendar"] == (
+            "24X7" if event["actor_role"] in {"TELEMETRY", "SOFTWARE", "PROCESS_OWNER"}
+            else "WEEKDAY_DAY_SHIFT"
+        )
+        for event in events
+    )
+
+    money_words = ("Payment", "Invoice", "Reserve", "Estimate", "Fee", "Price", "Credit Memo", "Quotation", "Recovery")
+    quantity_words = ("Material", "Goods", "Sample", "Dose", "Shipment", "Module", "Battery", "Stock", "Receipt")
+    attributes_are_typed = all(
+        (event["amount"] is not None) == any(word in event["ocel:activity"] for word in money_words)
+        and (event["currency"] == "EUR") == (event["amount"] is not None)
+        and (event["quantity"] is not None) == any(word in event["ocel:activity"] for word in quantity_words)
+        and (event["unit"] == "EA") == (event["quantity"] is not None)
+        for event in events
+    )
+
+    expected_by_source = {
+        (event["source_table"], str(event["source_record_id"])): event
+        for event in events
+    }
+    csv_stats: dict[str, dict[str, Any]] = {}
+    primary_by_source: dict[tuple[str, str], dict[str, str]] = {}
+    for view in views:
+        counts: Counter[str] = Counter()
+        sorted_ok = True
+        row_count = 0
+        previous: tuple[str, str, str] | None = None
+        with (folder / view["csv"]).open(encoding="utf-8", newline="") as handle:
+            reader = csv.DictReader(handle)
+            header_ok = (reader.fieldnames or [])[:3] == ["case_id", "activity", "timestamp"]
+            for row in reader:
+                row_count += 1
+                counts[row["case_id"]] += 1
+                key = (row["case_id"], row["timestamp"], row["source_record_id"])
+                if previous is not None and key < previous:
+                    sorted_ok = False
+                previous = key
+                if view["name"] == "primary_cases":
+                    primary_by_source[(row["source_table"], row["source_record_id"])] = row
+        csv_stats[view["name"]] = {
+            "rows": row_count,
+            "case_counts": counts,
+            "sorted": sorted_ok,
+            "header": header_ok,
+        }
+
+    fidelity_match_count = 0
+    for source_key, expected in expected_by_source.items():
+        actual = primary_by_source.get(source_key)
+        if actual is None:
+            continue
+        try:
+            actual_refs = set(json.loads(actual["object_refs"]))
+        except (TypeError, json.JSONDecodeError):
+            continue
+        if (
+            actual["case_id"] == _object_id(s, CASE_TYPES[s.slug], expected["case_no"])
+            and actual["activity"] == expected["ocel:activity"]
+            and actual["timestamp"] == _iso(expected["ocel:timestamp"])
+            and actual_refs == set(expected["object_refs"])
+        ):
+            fidelity_match_count += 1
+    csv_fidelity_fraction = fidelity_match_count / len(events)
+
+    primary_counts = csv_stats["primary_cases"]["case_counts"]
+    exception_counts = csv_stats["exception_cases"]["case_counts"]
+    multi_counts = csv_stats["multi_object_cases"]["case_counts"]
+    exception_trace_complete = bool(exception_counts) and all(
+        count == primary_counts[case_id] for case_id, count in exception_counts.items()
+    )
+    multi_trace_complete = bool(multi_counts) and all(
+        count == primary_counts[case_id] for case_id, count in multi_counts.items()
+    )
+    secondary_stats = csv_stats["secondary_object_cases"]
     checks = {
         "activity_diversity": set(frequency) == set(s.activities) and min(frequency.values()) >= MIN_ACTIVITY_FREQUENCY,
-        "object_diversity": len({o["ocel:type"] for o in objects.values()}) >= 10,
+        "object_catalogue_coverage": referenced_types == set(s.object_types),
+        "semantic_event_object_rulebook": all(
+            subject_type(s.slug, event["ocel:activity"], s.object_types) in rel_by_event[event["ocel:eid"]]
+            for event in events
+        ),
+        "coherent_stateful_routes": coherent_route_count == instance_count,
         "no_source_activity_leakage": not _source_contains_activity(conn, s.activities),
         "multi_object_events": multi_count / len(events) >= 0.15,
-        "temporal_object_attributes": len(changes) >= instance_count * 2,
-        "qualified_object_relations": bool(o2o) and all(r.get("ocel:qualifier") for r in o2o),
-        "temporal_relation_change": any(r.get("ocel:qualifier") == "reassigned-to" for r in o2o) and bool(changes),
+        "activity_appropriate_attributes": attributes_are_typed,
+        "role_specific_resources": role_specialization and role_count >= 4,
+        "temporal_object_attributes": len(change_types) >= 6 and len(changes) == len(events),
+        "effective_dated_object_relations": bool(o2o) and all(
+            relation.get("ocel:qualifier")
+            and relation.get("valid_from") is not None
+            and relation.get("valid_to") is not None
+            for relation in o2o
+        ),
         "loops_and_reversals": loop_cases / instance_count >= 0.20,
         "stable_identifiers": len({e["ocel:eid"] for e in events}) == len(events),
         "provenance": all(e.get("source_table") and e.get("source_record_id") for e in events),
-        "corrections_filtered": all("CORRECTION" not in str(e.get("source_record_id")) for e in events),
         "referential_validity": all(r["ocel:oid"] in object_ids for r in relations) and all(r["ocel:oid"] in object_ids and r["ocel:oid_2"] in object_ids for r in o2o),
-        "event_fusion": duplicate_evidence_present and views[0]["rows"] == len(events),
+        "event_fusion": duplicate_evidence_present and csv_stats["primary_cases"]["rows"] == len(events),
+        "csv_oracle_fidelity": len(primary_by_source) == len(events) and csv_fidelity_fraction == 1.0,
+        "csv_sort_order": all(stat["sorted"] and stat["header"] for stat in csv_stats.values()),
         "extraction_difficulty": max_source_catalogue_fraction <= 0.50,
-        "realistic_sharing": shared_object_fraction >= 0.10,
+        "type_specific_identity_sharing": transactional_sharing_violations == 0 and bool(shared_master_objects),
         "source_scale": _row_count(conn) >= MIN_SOURCE_ROWS,
         "oracle_scale": 25000 <= len(events) <= 200000,
-        "case_views": len(views) >= 2 and views[0]["rows"] == len(events),
+        "complete_exception_and_multi_views": exception_trace_complete and multi_trace_complete,
+        "multiple_case_notions": secondary_stats["rows"] > 0 and len(secondary_stats["case_counts"]) >= 50,
+        "case_views": len(views) == 4 and views[0]["rows"] == len(events),
         "oracle_separate_from_source": not conn.execute("SELECT 1 FROM sqlite_master WHERE name LIKE 'event_%' AND name LIKE '%object%' LIMIT 1").fetchone(),
     }
     report = {
@@ -829,11 +1079,17 @@ def _validate(s: Scenario, folder: Path, conn: sqlite3.Connection, events: list[
         "oracle_relation_count": len(relations),
         "object_object_relation_count": len(o2o),
         "object_change_count": len(changes),
+        "object_change_type_count": len(change_types),
         "activity_count": len(frequency),
         "minimum_activity_frequency": min(frequency.values()),
         "multi_object_event_fraction": round(multi_count / len(events), 6),
         "loop_instance_fraction": round(loop_cases / instance_count, 6),
         "shared_object_fraction": round(shared_object_fraction, 6),
+        "shared_master_object_count": len(shared_master_objects),
+        "transactional_sharing_violations": transactional_sharing_violations,
+        "role_count": role_count,
+        "coherent_route_fraction": round(coherent_route_count / instance_count, 6),
+        "csv_oracle_fidelity_fraction": round(csv_fidelity_fraction, 6),
         "largest_source_catalogue_fraction": round(max_source_catalogue_fraction, 6),
         "activity_frequencies": dict(sorted(frequency.items())),
         "case_views": views,
@@ -940,14 +1196,19 @@ def _write_docs(s: Scenario, folder: Path, instance_count: int, views: list[dict
         "object_type_catalogue": list(s.object_types),
         "activity_count": len(s.activities),
         "object_type_count": len(s.object_types),
+        "primary_case_type": CASE_TYPES[s.slug],
+        "secondary_case_type": SECONDARY_CASE_TYPES[s.slug],
         "oracle_writer": "pm4py.write_ocel2_sqlite",
         "case_views": views,
+        "case_view_ordering": ["case_id", "timestamp", "source_record_id"],
         "deterministic_rules": [
             "Technical codes are classified by the scenario-specific SQL mapping.",
             "Administrative correction, replay, retry, migration, and recalculation records are excluded.",
             "Business effective time takes precedence over recording/load time.",
             "Shared transaction or correlation identifiers are fused before case-view output.",
-            "The configured seed and modular occurrence schedule contain no nondeterministic input.",
+            "Only declared master-data types share identities across primary cases; transactional identities remain case-local.",
+            "Every CSV is sorted by case_id, timestamp, then source_record_id as a deterministic tie-breaker.",
+            "The configured seed and explicit process routes contain no nondeterministic input.",
         ] + rulebooks[s.slug],
     }
     (folder / "challenge_manifest.json").write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
@@ -981,6 +1242,10 @@ The database deliberately contains mixed business and technical records, late re
 ## Time and identity
 
 Business timestamps are normalized to UTC only by the extraction views. Source timestamps intentionally use ISO strings, split dates/times, epoch seconds, or effective/load pairs as appropriate. Canonical identities use the technical relationships or workflow scopes; no universal source event table exists.
+
+## Case views
+
+The primary case notion is `{CASE_TYPES[s.slug]}`. The secondary-object view uses `{SECONDARY_CASE_TYPES[s.slug]}` as an independent case notion. Exception and multi-object views retain complete primary-case traces and add explicit event flags. Every CSV is ordered first by `case_id`, then by `timestamp`, with `source_record_id` used only to break ties deterministically.
 
 ## Reproduction
 
@@ -1023,7 +1288,7 @@ def build_scenario(slug: str, folder: Path | str | None = None, *, instance_coun
         else:
             raise AssertionError(slug)
         conn.commit()
-        views = _write_case_views(conn, folder, query, s.loop_activities)
+        views = _write_case_views(conn, folder, query, s, events)
         _write_ocel(folder, events, objects, relations, o2o, changes)
         _write_docs(s, folder, instance_count, views)
         report = _validate(s, folder, conn, events, objects, relations, o2o, changes, instance_count, views)

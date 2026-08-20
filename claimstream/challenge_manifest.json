@@ -120,24 +120,59 @@
     "Claim Archived"
   ],
   "activity_count": 58,
+  "case_view_ordering": [
+    "case_id",
+    "timestamp",
+    "source_record_id"
+  ],
   "case_views": [
     {
+      "case_type": "Claim",
       "csv": "case_views/primary_cases.csv",
       "name": "primary_cases",
-      "rows": 38214,
+      "rows": 99715,
+      "sort_order": [
+        "case_id",
+        "timestamp",
+        "source_record_id"
+      ],
       "sql": "case_views/primary_cases.sql"
     },
     {
+      "case_type": "Claim",
       "csv": "case_views/exception_cases.csv",
       "name": "exception_cases",
-      "rows": 3199,
+      "rows": 53859,
+      "sort_order": [
+        "case_id",
+        "timestamp",
+        "source_record_id"
+      ],
       "sql": "case_views/exception_cases.sql"
     },
     {
+      "case_type": "Claim",
       "csv": "case_views/multi_object_cases.csv",
       "name": "multi_object_cases",
-      "rows": 15287,
+      "rows": 99715,
+      "sort_order": [
+        "case_id",
+        "timestamp",
+        "source_record_id"
+      ],
       "sql": "case_views/multi_object_cases.sql"
+    },
+    {
+      "case_type": "Exposure",
+      "csv": "case_views/secondary_object_cases.csv",
+      "name": "secondary_object_cases",
+      "rows": 45574,
+      "sort_order": [
+        "case_id",
+        "timestamp",
+        "source_record_id"
+      ],
+      "sql": "case_views/secondary_object_cases.sql"
     }
   ],
   "deterministic_rules": [
@@ -145,7 +180,9 @@
     "Administrative correction, replay, retry, migration, and recalculation records are excluded.",
     "Business effective time takes precedence over recording/load time.",
     "Shared transaction or correlation identifiers are fused before case-view output.",
-    "The configured seed and modular occurrence schedule contain no nondeterministic input.",
+    "Only declared master-data types share identities across primary cases; transactional identities remain case-local.",
+    "Every CSV is sorted by case_id, timestamp, then source_record_id as a deterministic tie-breaker.",
+    "The configured seed and explicit process routes contain no nondeterministic input.",
     "Exclude technical stream types and technical event aliases before business classification.",
     "Upcast money and identifier fields according to schema version before correlation.",
     "Fuse retries and cross-stream echoes by correlation ID plus semantic code; use payload effectiveAt as business time."
@@ -203,7 +240,9 @@
     "Settlement"
   ],
   "oracle_writer": "pm4py.write_ocel2_sqlite",
+  "primary_case_type": "Claim",
   "scenario": "claimstream",
+  "secondary_case_type": "Exposure",
   "seed": 20260820,
   "source_pattern": "event sourcing with upcasting, technical filtering, and cross-stream correlation",
   "title": "ClaimStream \u2014 property-insurance claims"

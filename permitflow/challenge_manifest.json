@@ -130,24 +130,59 @@
     "Case Archived"
   ],
   "activity_count": 63,
+  "case_view_ordering": [
+    "case_id",
+    "timestamp",
+    "source_record_id"
+  ],
   "case_views": [
     {
+      "case_type": "PermitApplication",
       "csv": "case_views/primary_cases.csv",
       "name": "primary_cases",
-      "rows": 39182,
+      "rows": 118084,
+      "sort_order": [
+        "case_id",
+        "timestamp",
+        "source_record_id"
+      ],
       "sql": "case_views/primary_cases.sql"
     },
     {
+      "case_type": "PermitApplication",
       "csv": "case_views/exception_cases.csv",
       "name": "exception_cases",
-      "rows": 4419,
+      "rows": 50721,
+      "sort_order": [
+        "case_id",
+        "timestamp",
+        "source_record_id"
+      ],
       "sql": "case_views/exception_cases.sql"
     },
     {
+      "case_type": "PermitApplication",
       "csv": "case_views/multi_object_cases.csv",
       "name": "multi_object_cases",
-      "rows": 15693,
+      "rows": 118084,
+      "sort_order": [
+        "case_id",
+        "timestamp",
+        "source_record_id"
+      ],
       "sql": "case_views/multi_object_cases.sql"
+    },
+    {
+      "case_type": "Inspection",
+      "csv": "case_views/secondary_object_cases.csv",
+      "name": "secondary_object_cases",
+      "rows": 15600,
+      "sort_order": [
+        "case_id",
+        "timestamp",
+        "source_record_id"
+      ],
+      "sql": "case_views/secondary_object_cases.sql"
     }
   ],
   "deterministic_rules": [
@@ -155,7 +190,9 @@
     "Administrative correction, replay, retry, migration, and recalculation records are excluded.",
     "Business effective time takes precedence over recording/load time.",
     "Shared transaction or correlation identifiers are fused before case-view output.",
-    "The configured seed and modular occurrence schedule contain no nondeterministic input.",
+    "Only declared master-data types share identities across primary cases; transactional identities remain case-local.",
+    "Every CSV is sorted by case_id, timestamp, then source_record_id as a deterministic tie-breaker.",
+    "The configured seed and explicit process routes contain no nondeterministic input.",
     "Interpret lifecycle and outcome together; canceled or migrated task end times are not completions.",
     "Resolve semantic role by process-definition version and activity migration metadata.",
     "Walk execution scope and select the latest variable revision visible at the activity time."
@@ -205,7 +242,9 @@
     "Appeal"
   ],
   "oracle_writer": "pm4py.write_ocel2_sqlite",
+  "primary_case_type": "PermitApplication",
   "scenario": "permitflow",
+  "secondary_case_type": "Inspection",
   "seed": 20260820,
   "source_pattern": "generic workflow history with execution ancestry, variable scope, outcomes, and migrations",
   "title": "PermitFlow \u2014 building-permit approval"

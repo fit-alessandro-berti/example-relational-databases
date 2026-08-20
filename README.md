@@ -12,8 +12,9 @@ extraction problems:
 
 Each folder contains `source.sqlite`, the source schema and generator,
 documentation and glossary, a machine-readable challenge manifest, an OCEL 2.0
-SQLite oracle written by PM4Py, a validation report, and three reproducible
-case-centric SQL/CSV views.
+SQLite oracle written by PM4Py, a validation report, and four reproducible
+case-centric SQL/CSV views. Every CSV is sorted by case ID and then timestamp;
+the final source-record key is used only to break ties deterministically.
 
 Regenerate everything with:
 
