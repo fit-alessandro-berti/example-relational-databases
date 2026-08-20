@@ -16,6 +16,27 @@ SQLite oracle written by PM4Py, a validation report, and four reproducible
 case-centric SQL/CSV views. Every CSV is sorted by case ID and then timestamp;
 the final source-record key is used only to break ties deterministically.
 
+## Git LFS
+
+`procurechange/source.sqlite` is stored with [Git LFS](https://git-lfs.github.com/)
+because it exceeds GitHub's 100 MB file-size limit. Install Git LFS before
+cloning or pulling so Git fetches the real SQLite database instead of a
+pointer file:
+
+```bash
+git lfs install
+git clone https://github.com/fit-alessandro-berti/example-relational-databases.git
+```
+
+If the repository was already cloned without Git LFS, install it and run:
+
+```bash
+git lfs pull
+```
+
+Without Git LFS, `procurechange/source.sqlite` is a small text pointer
+(`version https://git-lfs.github.com/spec/v1`) and is not a usable database.
+
 ## Current generation statistics
 
 These values describe the committed artifacts generated with the default 3,000
